@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	testdata "github.com/gin-gonic/gin/testdata/protoexample"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -359,6 +361,31 @@ func TestRenderProtoBufFail(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRenderBSON(t *testing.T) {
+	w := httptest.NewRecorder()
+	reps := []int64{int64(1), int64(2)}
+	type mystruct struct {
+		Label string
+		Reps  []int64
+	}
+
+	data := &mystruct{
+		Label: "test",
+		Reps:  reps,
+	}
+
+	(BSON{data}).WriteContentType(w)
+	bsonData, err := bson.Marshal(data)
+	require.NoError(t, err)
+	assert.Equal(t, "application/bson", w.Header().Get("Content-Type"))
+
+	err = (BSON{data}).Render(w)
+
+	require.NoError(t, err)
+	assert.Equal(t, bsonData, w.Body.Bytes())
+	assert.Equal(t, "application/bson", w.Header().Get("Content-Type"))
+}
+
 func TestRenderXML(t *testing.T) {
 	w := httptest.NewRecorder()
 	data := xmlmap{
@@ -427,6 +454,36 @@ func TestRenderData(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "#!PNG some raw data", w.Body.String())
 	assert.Equal(t, "image/png", w.Header().Get("Content-Type"))
+	assert.Equal(t, "19", w.Header().Get("Content-Length"))
+}
+
+func TestRenderDataContentLength(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		size, err := strconv.Atoi(r.URL.Query().Get("size"))
+		assert.NoError(t, err)
+
+		data := Data{
+			ContentType: "application/octet-stream",
+			Data:        make([]byte, size),
+		}
+		assert.NoError(t, data.Render(w))
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, size := range []int{0, 1, 100, 100_000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			resp, err := http.Get(srv.URL + "?size=" + strconv.Itoa(size))
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, "application/octet-stream", resp.Header.Get("Content-Type"))
+			assert.Equal(t, strconv.Itoa(size), resp.Header.Get("Content-Length"))
+
+			actual, err := io.Copy(io.Discard, resp.Body)
+			require.NoError(t, err)
+			assert.EqualValues(t, size, actual)
+		})
+	}
 }
 
 func TestRenderString(t *testing.T) {
